@@ -5,6 +5,7 @@ import { createClient } from "@/lib/supabase/client";
 
 type Sale = {
   id: string;
+  customer_id: string | null;
   sale_date: string;
   total: number;
   status: string;
@@ -36,8 +37,27 @@ type Product = {
 
 type SaleItem = {
   sale_id: string;
+  product_id: string;
   quantity: number;
+  unit_price: number;
+  total: number;
   cost_total: number;
+};
+
+type ProductPerformance = {
+  productId: string;
+  name: string;
+  quantity: number;
+  revenue: number;
+  cost: number;
+  profit: number;
+  margin: number;
+};
+
+type DailyPerformance = {
+  date: string;
+  revenue: number;
+  profit: number;
 };
 
 type FinancialTransaction = {
@@ -68,6 +88,12 @@ type Goal = {
   start_date: string;
   end_date: string;
   active: boolean;
+};
+
+type CustomerLead = {
+  id: string;
+  name: string;
+  lead_source: string | null;
 };
 
 const supabase = createClient();
@@ -196,7 +222,7 @@ function calculateGoalValue(
   return 0;
 }
 
-type DashboardPeriod = "today" | "7days" | "month";
+type DashboardPeriod = "today" | "7days" | "30days" | "month";
 
 export default function Dashboard() {
   const [loading, setLoading] = useState(true);
@@ -212,6 +238,7 @@ export default function Dashboard() {
   >([]);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [goals, setGoals] = useState<Goal[]>([]);
+  const [customers, setCustomers] = useState<CustomerLead[]>([]);
 
   async function loadDashboard() {
     setLoading(true);
@@ -224,11 +251,13 @@ export default function Dashboard() {
       transactionsResult,
       campaignsResult,
       goalsResult,
+      customersResult,
     ] = await Promise.all([
       supabase
         .from("sales")
         .select(`
           id,
+          customer_id,
           sale_date,
           total,
           status,
@@ -269,7 +298,7 @@ export default function Dashboard() {
       supabase
         .from("sale_items")
         .select(
-          "sale_id, quantity, cost_total"
+          "sale_id, product_id, quantity, unit_price, total, cost_total"
         ),
 
       supabase
@@ -294,6 +323,11 @@ export default function Dashboard() {
         .select(
           "id, name, goal_type, target_value, current_value, start_date, end_date, active"
         ),
+
+      supabase
+        .from("customers")
+        .select("id, name, lead_source")
+        .eq("active", true),
     ]);
 
     if (salesResult.error) {
@@ -345,6 +379,13 @@ export default function Dashboard() {
       );
     }
 
+    if (customersResult.error) {
+      console.error(
+        "Erro ao carregar clientes:",
+        customersResult.error
+      );
+    }
+
     setSales(
       (salesResult.data || []) as Sale[]
     );
@@ -375,6 +416,10 @@ export default function Dashboard() {
       (goalsResult.data || []) as Goal[]
     );
 
+    setCustomers(
+      (customersResult.data || []) as CustomerLead[]
+    );
+
     setLoading(false);
   }
 
@@ -385,6 +430,7 @@ export default function Dashboard() {
   const todayString = getToday();
   const monthStart = getMonthStart();
   const sevenDaysStart = getDateDaysAgo(6);
+  const thirtyDaysStart = getDateDaysAgo(29);
 
   /*
    * VENDAS / PERÍODOS
@@ -408,6 +454,12 @@ export default function Dashboard() {
   const salesLast7Days = normalizedSales.filter(
     (sale) =>
       sale.normalizedDate >= sevenDaysStart &&
+      sale.normalizedDate <= todayString
+  );
+
+  const salesLast30Days = normalizedSales.filter(
+    (sale) =>
+      sale.normalizedDate >= thirtyDaysStart &&
       sale.normalizedDate <= todayString
   );
 
@@ -438,6 +490,12 @@ export default function Dashboard() {
     0
   );
 
+  const revenue30Days = salesLast30Days.reduce(
+    (sum, sale) =>
+      sum + Number(sale.total || 0),
+    0
+  );
+
   const revenueMonth = salesThisMonth.reduce(
     (sum, sale) =>
       sum + Number(sale.total || 0),
@@ -460,6 +518,14 @@ export default function Dashboard() {
     0
   );
 
+  const profit30Days = salesLast30Days.reduce(
+    (sum, sale) =>
+      sum +
+      Number(sale.total || 0) -
+      (saleCostMap.get(sale.id) || 0),
+    0
+  );
+
   const grossProfitMonth = salesThisMonth.reduce(
     (sum, sale) =>
       sum +
@@ -473,46 +539,222 @@ export default function Dashboard() {
       ? salesToday
       : dashboardPeriod === "7days"
         ? salesLast7Days
-        : salesThisMonth;
+        : dashboardPeriod === "30days"
+          ? salesLast30Days
+          : salesThisMonth;
 
   const selectedRevenue =
     dashboardPeriod === "today"
       ? revenueToday
       : dashboardPeriod === "7days"
         ? revenue7Days
-        : revenueMonth;
+        : dashboardPeriod === "30days"
+          ? revenue30Days
+          : revenueMonth;
 
   const selectedProfit =
     dashboardPeriod === "today"
       ? profitToday
       : dashboardPeriod === "7days"
         ? profit7Days
-        : grossProfitMonth;
+        : dashboardPeriod === "30days"
+          ? profit30Days
+          : grossProfitMonth;
 
   const selectedPeriodLabel =
     dashboardPeriod === "today"
       ? "Hoje"
       : dashboardPeriod === "7days"
         ? "Últimos 7 dias"
-        : "Este mês";
+        : dashboardPeriod === "30days"
+          ? "Últimos 30 dias"
+          : "Este mês";
 
-  const productsSoldMonth = saleItems
-    .filter((item) => {
-      const sale = normalizedSales.find(
-        (sale) => sale.id === item.sale_id
+  const selectedPeriodStart =
+    dashboardPeriod === "today"
+      ? todayString
+      : dashboardPeriod === "7days"
+        ? sevenDaysStart
+        : dashboardPeriod === "30days"
+          ? thirtyDaysStart
+          : monthStart;
+
+  const selectedPeriodSales = selectedSales;
+
+  const selectedSaleIds = new Set(
+    selectedPeriodSales.map((sale) => sale.id)
+  );
+
+  const productMap = new Map(
+    products.map((product) => [product.id, product])
+  );
+
+  const productPerformance: ProductPerformance[] = (() => {
+    const map = new Map<string, ProductPerformance>();
+
+    saleItems.forEach((item) => {
+      if (!selectedSaleIds.has(item.sale_id)) return;
+
+      const product = productMap.get(item.product_id);
+      if (!product) return;
+
+      const current = map.get(item.product_id) || {
+        productId: item.product_id,
+        name: product.name,
+        quantity: 0,
+        revenue: 0,
+        cost: 0,
+        profit: 0,
+        margin: 0,
+      };
+
+      current.quantity += Number(item.quantity || 0);
+      current.revenue += Number(
+        item.total ||
+          Number(item.unit_price || 0) * Number(item.quantity || 0)
+      );
+      current.cost += Number(item.cost_total || 0);
+      current.profit = current.revenue - current.cost;
+      current.margin =
+        current.revenue > 0
+          ? (current.profit / current.revenue) * 100
+          : 0;
+
+      map.set(item.product_id, current);
+    });
+
+    return Array.from(map.values()).sort(
+      (a, b) => b.revenue - a.revenue
+    );
+  })();
+
+  const topProducts = productPerformance.slice(0, 5);
+
+  const selectedMargin =
+    selectedRevenue > 0
+      ? (selectedProfit / selectedRevenue) * 100
+      : 0;
+
+  const dailyPerformance: DailyPerformance[] = (() => {
+    const start = new Date(`${selectedPeriodStart}T00:00:00Z`);
+    const end = new Date(`${todayString}T00:00:00Z`);
+    const result: DailyPerformance[] = [];
+
+    for (
+      const cursor = new Date(start);
+      cursor <= end;
+      cursor.setUTCDate(cursor.getUTCDate() + 1)
+    ) {
+      const date = cursor.toISOString().slice(0, 10);
+      const daySales = selectedPeriodSales.filter(
+        (sale) => sale.normalizedDate === date
       );
 
-      return (
-        sale &&
-        sale.normalizedDate >= monthStart &&
-        sale.normalizedDate <= todayString
+      const revenue = daySales.reduce(
+        (sum, sale) => sum + Number(sale.total || 0),
+        0
       );
-    })
+
+      const profit = daySales.reduce(
+        (sum, sale) =>
+          sum +
+          Number(sale.total || 0) -
+          (saleCostMap.get(sale.id) || 0),
+        0
+      );
+
+      result.push({ date, revenue, profit });
+    }
+
+    return result;
+  })();
+
+  // Escala do gráfico: inclui zero e também lucros negativos, sem deixar
+  // a linha "grudada" no topo/rodapé quando os valores forem pequenos.
+  const chartValues = dailyPerformance.flatMap((day) => [
+    Number(day.revenue || 0),
+    Number(day.profit || 0),
+    0,
+  ]);
+
+  const chartMin = Math.min(...chartValues, 0);
+  const chartMax = Math.max(...chartValues, 1);
+  const chartRange = Math.max(chartMax - chartMin, 1);
+
+  const getChartX = (index: number) => {
+    if (dailyPerformance.length <= 1) return 500;
+    return (index / (dailyPerformance.length - 1)) * 1000;
+  };
+
+  const getChartY = (value: number) => {
+    const normalized = (Number(value || 0) - chartMin) / chartRange;
+    return 280 - normalized * 250;
+  };
+
+  const paymentPerformance = (() => {
+    const map = new Map<string, { label: string; sales: number; revenue: number }>();
+
+    selectedSales.forEach((sale) => {
+      const key = sale.payment_method || "Não informado";
+      const current = map.get(key) || {
+        label: key,
+        sales: 0,
+        revenue: 0,
+      };
+
+      current.sales += 1;
+      current.revenue += Number(sale.total || 0);
+      map.set(key, current);
+    });
+
+    return Array.from(map.values()).sort(
+      (a, b) => b.revenue - a.revenue
+    );
+  })();
+
+  const customerPerformance = (() => {
+    const map = new Map<string, { name: string; sales: number; revenue: number }>();
+
+    selectedSales.forEach((sale) => {
+      const key = sale.customer_id || "consumer-final";
+      const name = sale.customers?.name || "Consumidor final";
+      const current = map.get(key) || {
+        name,
+        sales: 0,
+        revenue: 0,
+      };
+
+      current.sales += 1;
+      current.revenue += Number(sale.total || 0);
+      map.set(key, current);
+    });
+
+    return Array.from(map.values())
+      .sort((a, b) => b.revenue - a.revenue)
+      .slice(0, 5);
+  })();
+
+  const selectedProductsSold = saleItems
+    .filter((item) => selectedSaleIds.has(item.sale_id))
     .reduce(
-      (sum, item) =>
-        sum + Number(item.quantity || 0),
+      (sum, item) => sum + Number(item.quantity || 0),
       0
     );
+
+
+  const leadSourcePerformance = (() => {
+    const map = new Map<string, number>();
+
+    customers.forEach((customer) => {
+      const source = customer.lead_source || "Não informado";
+      map.set(source, (map.get(source) || 0) + 1);
+    });
+
+    return Array.from(map.entries())
+      .map(([source, count]) => ({ source, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 6);
+  })();
 
   /*
    * FINANCEIRO
@@ -745,6 +987,38 @@ export default function Dashboard() {
 
         </div>
 
+        {/* ACESSO RÁPIDO */}
+        <section className="mb-8">
+          <div className="mb-3">
+            <p className="text-xs text-white/40">Acesso rápido</p>
+            <p className="mt-1 text-sm text-white/60">
+              Navegue diretamente pelos módulos do PBL Management.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-9">
+            {[
+              ["Vendas", "/vendas"],
+              ["Estoque", "/estoque"],
+              ["Compras", "/compras"],
+              ["Produtos", "/produtos"],
+              ["Clientes", "/clientes"],
+              ["Financeiro", "/financeiro"],
+              ["Marketing", "/marketing"],
+              ["Metas", "/metas"],
+              ["Configurações", "/configuracoes"],
+            ].map(([label, href]) => (
+              <a
+                key={href}
+                href={href}
+                className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-3 text-center text-xs text-white/55 transition hover:border-white/20 hover:bg-white/[0.06] hover:text-white"
+              >
+                {label}
+              </a>
+            ))}
+          </div>
+        </section>
+
         {/* PRINCIPAIS KPIs */}
 
         <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -753,7 +1027,7 @@ export default function Dashboard() {
               Desempenho de vendas
             </p>
             <p className="mt-1 text-sm text-white/60">
-              Receita e lucro por período
+              Receita e lucro por período. “30 dias” considera os últimos 30 dias corridos, mesmo atravessando a virada do mês.
             </p>
           </div>
 
@@ -761,7 +1035,8 @@ export default function Dashboard() {
             {[
               ["today", "Hoje"],
               ["7days", "7 dias"],
-              ["month", "Mês"],
+              ["30days", "30 dias"],
+              ["month", "Mês atual"],
             ].map(([value, label]) => (
               <button
                 key={value}
@@ -851,17 +1126,17 @@ export default function Dashboard() {
           <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5">
 
             <p className="text-xs text-white/40">
-              Produtos vendidos no mês
+              Produtos vendidos no período
             </p>
 
             <p className="mt-2 text-xl font-semibold">
               {formatNumber(
-                productsSoldMonth
+                selectedProductsSold
               )}
             </p>
 
             <p className="mt-2 text-xs text-white/30">
-              unidades
+              unidades · {selectedPeriodLabel.toLowerCase()}
             </p>
 
           </div>
@@ -1071,6 +1346,311 @@ export default function Dashboard() {
 
         </div>
 
+        {/* ANÁLISE V2 */}
+
+        <div className="mt-8 grid gap-6 xl:grid-cols-3">
+
+          <section className="rounded-2xl border border-white/10 bg-white/[0.03] xl:col-span-2">
+            <div className="border-b border-white/10 px-6 py-5">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <h2 className="font-semibold">Desempenho</h2>
+                  <p className="mt-1 text-xs text-white/35">
+                    Receita e lucro · {selectedPeriodLabel}
+                  </p>
+                </div>
+                <div className="text-right">
+                  <p className="text-xs text-white/35">Margem bruta</p>
+                  <p className="mt-1 text-sm font-semibold">
+                    {selectedMargin.toFixed(1)}%
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="p-6">
+              <div className="relative h-64 overflow-hidden rounded-xl border border-white/10 bg-black/20 p-4">
+                {dailyPerformance.length > 0 ? (
+                  <svg
+                    viewBox="0 0 1000 300"
+                    preserveAspectRatio="none"
+                    className="h-full w-full overflow-visible"
+                    role="img"
+                    aria-label={`Gráfico de receita e lucro de ${selectedPeriodLabel.toLowerCase()}`}
+                  >
+                    {[25, 50, 75].map((y) => (
+                      <line
+                        key={y}
+                        x1="0"
+                        x2="1000"
+                        y1={y * 3}
+                        y2={y * 3}
+                        stroke="currentColor"
+                        strokeOpacity="0.08"
+                        strokeWidth="1"
+                      />
+                    ))}
+
+                    {/* Linha de zero para deixar lucros negativos legíveis. */}
+                    <line
+                      x1="0"
+                      x2="1000"
+                      y1={getChartY(0)}
+                      y2={getChartY(0)}
+                      stroke="currentColor"
+                      strokeOpacity="0.12"
+                      strokeDasharray="5 6"
+                    />
+
+                    {/* RECEITA */}
+                    <polyline
+                      fill="none"
+                      stroke="currentColor"
+                      strokeOpacity="0.45"
+                      strokeWidth="3"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      points={dailyPerformance
+                        .map((day, index) =>
+                          `${getChartX(index)},${getChartY(day.revenue)}`
+                        )
+                        .join(" ")}
+                    />
+
+                    {/* LUCRO */}
+                    <polyline
+                      fill="none"
+                      stroke="currentColor"
+                      strokeOpacity="1"
+                      strokeWidth="3"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      points={dailyPerformance
+                        .map((day, index) =>
+                          `${getChartX(index)},${getChartY(day.profit)}`
+                        )
+                        .join(" ")}
+                    />
+
+                    {dailyPerformance.map((day, index) => {
+                      const x = getChartX(index);
+                      const revenueY = getChartY(day.revenue);
+                      const profitY = getChartY(day.profit);
+
+                      return (
+                        <g key={day.date}>
+                          <circle
+                            cx={x}
+                            cy={revenueY}
+                            r="4"
+                            fill="currentColor"
+                            fillOpacity="0.45"
+                          >
+                            <title>
+                              {formatDate(day.date)} · Receita {formatMoney(day.revenue)}
+                            </title>
+                          </circle>
+
+                          <circle
+                            cx={x}
+                            cy={profitY}
+                            r="4"
+                            fill="currentColor"
+                          >
+                            <title>
+                              {formatDate(day.date)} · Lucro {formatMoney(day.profit)}
+                            </title>
+                          </circle>
+                        </g>
+                      );
+                    })}
+                  </svg>
+                ) : (
+                  <div className="flex h-full items-center justify-center text-sm text-white/30">
+                    Sem vendas no período selecionado.
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-3 flex items-center justify-between text-[11px] text-white/25">
+                <span>{formatDate(dailyPerformance[0]?.date)}</span>
+                <span>Receita · Lucro</span>
+                <span>{formatDate(dailyPerformance[dailyPerformance.length - 1]?.date)}</span>
+              </div>
+            </div>
+          </section>
+
+          <section className="rounded-2xl border border-white/10 bg-white/[0.03]">
+            <div className="border-b border-white/10 px-6 py-5">
+              <h2 className="font-semibold">Resumo do período</h2>
+              <p className="mt-1 text-xs text-white/35">
+                Indicadores · {selectedPeriodLabel}
+              </p>
+            </div>
+
+            <div className="space-y-4 p-6">
+              <div>
+                <p className="text-xs text-white/35">Vendas</p>
+                <p className="mt-1 text-xl font-semibold">
+                  {formatNumber(selectedSales.length)}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-white/35">Ticket médio</p>
+                <p className="mt-1 text-xl font-semibold">
+                  {formatMoney(
+                    selectedSales.length > 0
+                      ? selectedRevenue / selectedSales.length
+                      : 0
+                  )}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-white/35">Margem bruta</p>
+                <p className="mt-1 text-xl font-semibold">
+                  {selectedMargin.toFixed(1)}%
+                </p>
+              </div>
+            </div>
+          </section>
+
+        </div>
+
+        <section className="mt-6 rounded-2xl border border-white/10 bg-white/[0.03]">
+          <div className="flex items-center justify-between border-b border-white/10 px-6 py-5">
+            <div>
+              <h2 className="font-semibold">Produtos em destaque</h2>
+              <p className="mt-1 text-xs text-white/35">
+                Ranking por faturamento · {selectedPeriodLabel}
+              </p>
+            </div>
+            <a
+              href="/produtos"
+              className="text-xs text-white/40 transition hover:text-white"
+            >
+              Ver produtos →
+            </a>
+          </div>
+
+          {topProducts.length === 0 ? (
+            <div className="p-8 text-center text-sm text-white/35">
+              Nenhuma venda no período selecionado.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[720px] text-sm">
+                <thead className="border-b border-white/10 text-xs text-white/30">
+                  <tr>
+                    <th className="px-6 py-4 text-left font-normal">Produto</th>
+                    <th className="px-6 py-4 text-right font-normal">Vendidos</th>
+                    <th className="px-6 py-4 text-right font-normal">Receita</th>
+                    <th className="px-6 py-4 text-right font-normal">Lucro</th>
+                    <th className="px-6 py-4 text-right font-normal">Margem</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/10">
+                  {topProducts.map((product) => (
+                    <tr key={product.productId} className="transition hover:bg-white/[0.02]">
+                      <td className="px-6 py-4 font-medium">{product.name}</td>
+                      <td className="px-6 py-4 text-right text-white/60">{formatNumber(product.quantity)}</td>
+                      <td className="px-6 py-4 text-right">{formatMoney(product.revenue)}</td>
+                      <td className="px-6 py-4 text-right">{formatMoney(product.profit)}</td>
+                      <td className="px-6 py-4 text-right text-white/60">{product.margin.toFixed(1)}%</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+        <div className="mt-6 grid gap-6 xl:grid-cols-2">
+
+          <section className="rounded-2xl border border-white/10 bg-white/[0.03]">
+            <div className="border-b border-white/10 px-6 py-5">
+              <h2 className="font-semibold">Formas de pagamento</h2>
+              <p className="mt-1 text-xs text-white/35">
+                Receita por forma de pagamento · {selectedPeriodLabel}
+              </p>
+            </div>
+
+            {paymentPerformance.length === 0 ? (
+              <div className="p-8 text-center text-sm text-white/35">
+                Nenhuma venda no período selecionado.
+              </div>
+            ) : (
+              <div className="divide-y divide-white/10">
+                {paymentPerformance.map((payment) => {
+                  const share =
+                    selectedRevenue > 0
+                      ? (payment.revenue / selectedRevenue) * 100
+                      : 0;
+
+                  return (
+                    <div key={payment.label} className="px-6 py-4">
+                      <div className="flex items-center justify-between gap-4">
+                        <div>
+                          <p className="text-sm font-medium">{payment.label}</p>
+                          <p className="mt-1 text-xs text-white/35">
+                            {formatNumber(payment.sales)} venda(s) · {share.toFixed(1)}% da receita
+                          </p>
+                        </div>
+                        <p className="text-sm font-semibold">{formatMoney(payment.revenue)}</p>
+                      </div>
+                      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/10">
+                        <div
+                          className="h-full rounded-full bg-white/70"
+                          style={{ width: `${Math.min(share, 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+
+          <section className="rounded-2xl border border-white/10 bg-white/[0.03]">
+            <div className="border-b border-white/10 px-6 py-5">
+              <h2 className="font-semibold">Clientes que mais compram</h2>
+              <p className="mt-1 text-xs text-white/35">
+                Ranking por faturamento · {selectedPeriodLabel}
+              </p>
+            </div>
+
+            {customerPerformance.length === 0 ? (
+              <div className="p-8 text-center text-sm text-white/35">
+                Nenhuma venda no período selecionado.
+              </div>
+            ) : (
+              <div className="divide-y divide-white/10">
+                {customerPerformance.map((customer, index) => (
+                  <div
+                    key={`${customer.name}-${index}`}
+                    className="flex items-center justify-between gap-4 px-6 py-4"
+                  >
+                    <div className="flex min-w-0 items-center gap-3">
+                      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-white/10 text-xs text-white/45">
+                        {index + 1}
+                      </span>
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium">{customer.name}</p>
+                        <p className="mt-1 text-xs text-white/35">
+                          {formatNumber(customer.sales)} compra(s)
+                        </p>
+                      </div>
+                    </div>
+                    <p className="whitespace-nowrap text-sm font-semibold">
+                      {formatMoney(customer.revenue)}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+        </div>
+
         {/* SEGUNDA ÁREA */}
 
         <div className="mt-6 grid gap-6 xl:grid-cols-2">
@@ -1213,6 +1793,44 @@ export default function Dashboard() {
           </section>
 
         </div>
+
+        {/* ORIGEM DOS LEADS */}
+
+        <section className="mt-6 rounded-2xl border border-white/10 bg-white/[0.03]">
+          <div className="flex items-center justify-between border-b border-white/10 px-6 py-5">
+            <div>
+              <h2 className="font-semibold">Origem dos leads</h2>
+              <p className="mt-1 text-xs text-white/35">
+                De onde vieram os clientes cadastrados
+              </p>
+            </div>
+            <a
+              href="/clientes"
+              className="text-xs text-white/40 transition hover:text-white"
+            >
+              Gerenciar clientes →
+            </a>
+          </div>
+
+          {leadSourcePerformance.length === 0 ? (
+            <div className="p-8 text-center text-sm text-white/35">
+              Nenhuma origem cadastrada ainda.
+            </div>
+          ) : (
+            <div className="grid gap-3 p-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+              {leadSourcePerformance.map((item) => (
+                <div
+                  key={item.source}
+                  className="rounded-xl border border-white/10 bg-black/20 p-4"
+                >
+                  <p className="truncate text-sm font-medium">{item.source}</p>
+                  <p className="mt-2 text-2xl font-semibold">{formatNumber(item.count)}</p>
+                  <p className="mt-1 text-xs text-white/30">cliente(s)</p>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
 
         {/* MARKETING + METAS */}
 
